@@ -410,42 +410,32 @@ export default function AirfoilAnalysisSuite() {
     const msgs = [...aiHistory, { role: "user", content: query }];
     const payload = { model: "claude-sonnet-4-20250514", max_tokens: 1000, system: sys, messages: msgs };
 
-    try {
-      // Try direct Anthropic API first (works inside Claude artifacts)
-      let res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
+    // Determine which endpoint to use:
+    // - Inside Claude artifacts: direct API works (no CORS, auth handled)
+    // - Deployed on Vercel: must use /api/chat proxy
+    const endpoints = ["/api/chat", "https://api.anthropic.com/v1/messages"];
 
-      // If CORS or auth fails, fall back to local API proxy (for Vercel deployment)
-      if (!res.ok) {
-        res = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
-        });
-      }
-
-      const data = await res.json();
-      const text = data.content?.map(c => c.text || "").join("") || data.error?.message || "No response received. Check API route setup.";
-      setAiResponse(text);
-      setAiHistory([...msgs, { role: "assistant", content: text }]);
-    } catch {
-      // If both fail, try proxy one more time (direct fetch might throw instead of returning)
+    let succeeded = false;
+    for (const url of endpoints) {
       try {
-        const res = await fetch("/api/chat", {
+        const res = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
         });
+        if (!res.ok) continue;
         const data = await res.json();
-        const text = data.content?.map(c => c.text || "").join("") || "No response.";
-        setAiResponse(text);
-        setAiHistory([...msgs, { role: "assistant", content: text }]);
-      } catch {
-        setAiResponse("Connection error. If deployed on Vercel, make sure you've added the /api/chat.js route and set the ANTHROPIC_API_KEY environment variable. See the setup guide.");
-      }
+        const text = data.content?.filter(c => c.type === "text").map(c => c.text).join("\n");
+        if (text) {
+          setAiResponse(text);
+          setAiHistory([...msgs, { role: "assistant", content: text }]);
+          succeeded = true;
+          break;
+        }
+      } catch { /* try next endpoint */ }
+    }
+    if (!succeeded) {
+      setAiResponse("Could not connect to AI.\n\nIf running locally: AI requires deployment.\nIf deployed on Vercel:\n1. Add api/chat.js to your project root\n2. Add vercel.json to your project root\n3. Set ANTHROPIC_API_KEY in Vercel → Settings → Environment Variables\n4. Redeploy");
     }
     setAiLoading(false);
   }, [aiQuery, aiLoading, aiHistory, results, getLabel, alpha]);
@@ -516,7 +506,8 @@ export default function AirfoilAnalysisSuite() {
       <div style={{ minHeight: "100vh", background: "#060a13", fontFamily: "'IBM Plex Sans', -apple-system, sans-serif", color: "#e2e8f0", overflow: "hidden" }}>
         <style>{`
           @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
-          * { box-sizing: border-box; margin: 0; padding: 0; }
+          *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+          html, body, #root { margin: 0; padding: 0; width: 100%; overflow-x: hidden; background: #060a13; }
           @keyframes fadeUp { from { opacity: 0; transform: translateY(30px); } to { opacity: 1; transform: translateY(0); } }
           @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
           @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
@@ -656,7 +647,8 @@ export default function AirfoilAnalysisSuite() {
     <div style={{ minHeight: "100vh", background: "linear-gradient(160deg, #0a0f1a 0%, #101827 40%, #0a0f1a 100%)", fontFamily: "'IBM Plex Sans', -apple-system, sans-serif", color: "#e2e8f0", padding: 0, margin: 0 }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
-        * { box-sizing: border-box; }
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body, #root { margin: 0; padding: 0; width: 100%; overflow-x: hidden; background: #0a0f1a; }
         .gp { background: rgba(15,23,42,0.55); backdrop-filter: blur(16px); border: 1px solid rgba(51,65,85,0.35); border-radius: 10px; }
         .mc { background: linear-gradient(135deg, rgba(15,23,42,0.7), rgba(30,41,59,0.35)); border: 1px solid rgba(51,65,85,0.4); border-radius: 8px; padding: 12px 16px; transition: border-color 0.2s; }
         .mc:hover { border-color: rgba(37,99,235,0.35); }
