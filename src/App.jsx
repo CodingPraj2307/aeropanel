@@ -410,32 +410,36 @@ export default function AirfoilAnalysisSuite() {
     const msgs = [...aiHistory, { role: "user", content: query }];
     const payload = { model: "claude-sonnet-4-20250514", max_tokens: 1000, system: sys, messages: msgs };
 
-    // Determine which endpoint to use:
-    // - Inside Claude artifacts: direct API works (no CORS, auth handled)
-    // - Deployed on Vercel: must use /api/chat proxy
-    const endpoints = ["/api/chat", "https://api.anthropic.com/v1/messages"];
+    try {
+      // Detect environment: if on localhost, try direct API (Claude artifacts).
+      // If deployed (not localhost), use the /api/chat proxy.
+      const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+      const url = isLocal ? "https://api.anthropic.com/v1/messages" : "/api/chat";
 
-    let succeeded = false;
-    for (const url of endpoints) {
-      try {
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
-        });
-        if (!res.ok) continue;
-        const data = await res.json();
-        const text = data.content?.filter(c => c.type === "text").map(c => c.text).join("\n");
-        if (text) {
-          setAiResponse(text);
-          setAiHistory([...msgs, { role: "assistant", content: text }]);
-          succeeded = true;
-          break;
-        }
-      } catch { /* try next endpoint */ }
-    }
-    if (!succeeded) {
-      setAiResponse("Could not connect to AI.\n\nIf running locally: AI requires deployment.\nIf deployed on Vercel:\n1. Add api/chat.js to your project root\n2. Add vercel.json to your project root\n3. Set ANTHROPIC_API_KEY in Vercel → Settings → Environment Variables\n4. Redeploy");
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        const errMsg = data?.error?.message || `Server returned ${res.status}`;
+        setAiResponse("Error: " + errMsg);
+        setAiLoading(false);
+        return;
+      }
+
+      const text = data.content?.filter(c => c.type === "text").map(c => c.text).join("\n");
+      if (text) {
+        setAiResponse(text);
+        setAiHistory([...msgs, { role: "assistant", content: text }]);
+      } else {
+        setAiResponse("Received empty response from AI. Response data: " + JSON.stringify(data).slice(0, 200));
+      }
+    } catch (err) {
+      setAiResponse("Connection failed: " + (err.message || "Unknown error") + "\n\nIf running locally: AI only works in Claude artifacts or when deployed.\nIf deployed: check that api/chat.js exists and ANTHROPIC_API_KEY is set in Vercel.");
     }
     setAiLoading(false);
   }, [aiQuery, aiLoading, aiHistory, results, getLabel, alpha]);

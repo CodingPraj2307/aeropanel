@@ -1,79 +1,76 @@
-// api/chat.js — Secure Vercel Serverless Function
+// api/chat.js
 
-const rateLimitMap = new Map();
-const RATE_LIMIT_WINDOW = 60000;
-const RATE_LIMIT_MAX = 15;
+const rateLimits = {};
 
-function isRateLimited(ip) {
-  const now = Date.now();
-  const entry = rateLimitMap.get(ip);
-  if (!entry || now - entry.start > RATE_LIMIT_WINDOW) {
-    rateLimitMap.set(ip, { start: now, count: 1 });
-    return false;
-  }
-  entry.count++;
-  return entry.count > RATE_LIMIT_MAX;
-}
-
-// Helper: read and parse the request body manually
-function parseBody(req) {
-  return new Promise((resolve, reject) => {
-    // If Vercel already parsed it
-    if (req.body && typeof req.body === "object") {
-      return resolve(req.body);
-    }
-    let data = "";
-    req.on("data", (chunk) => { data += chunk; });
-    req.on("end", () => {
-      try {
-        resolve(data ? JSON.parse(data) : {});
-      } catch (e) {
-        reject(new Error("Invalid JSON"));
-      }
-    });
-    req.on("error", reject);
-  });
-}
-
-export default async function handler(req, res) {
-  // CORS
-  const allowedOrigin = process.env.ALLOWED_ORIGIN || "*";
-  res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+module.exports = async function handler(req, res) {
+  // CORS headers — always set these
+  res.setHeader("Access-Control-Allow-Origin", process.env.ALLOWED_ORIGIN || "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: { message: "Method not allowed" } });
+  // Preflight
+  if (req.method === "OPTIONS") {
+    res.status(200).end();
+    return;
+  }
 
-  // Rate limit
-  const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || "unknown";
-  if (isRateLimited(ip)) return res.status(429).json({ error: { message: "Rate limited. Try again in a minute." } });
+  // POST only
+  if (req.method !== "POST") {
+    res.status(405).json({ error: { message: "POST only" } });
+    return;
+  }
 
-  // API key
+  // Rate limit: 15/min per IP
+  const ip = (req.headers["x-forwarded-for"] || "unknown").split(",")[0].trim();
+  const now = Date.now();
+  if (!rateLimits[ip] || now - rateLimits[ip].t > 60000) {
+    rateLimits[ip] = { t: now, c: 1 };
+  } else {
+    rateLimits[ip].c++;
+    if (rateLimits[ip].c > 15) {
+      res.status(429).json({ error: { message: "Rate limited." } });
+      return;
+    }
+  }
+
+  // Check API key
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return res.status(500).json({ error: { message: "ANTHROPIC_API_KEY not set. Add it in Vercel Settings → Environment Variables." } });
+  if (!apiKey) {
+    res.status(500).json({ error: { message: "ANTHROPIC_API_KEY not configured on server." } });
+    return;
+  }
 
-  // Parse body
-  let body;
-  try {
-    body = await parseBody(req);
-  } catch (e) {
-    return res.status(400).json({ error: { message: "Invalid JSON body." } });
+  // Get body — handle both pre-parsed and raw
+  let body = req.body;
+  if (!body || typeof body !== "object" || Object.keys(body).length === 0) {
+    try {
+      const chunks = [];
+      for await (const chunk of req) {
+        chunks.push(chunk);
+      }
+      const raw = Buffer.concat(chunks).toString("utf-8");
+      body = JSON.parse(raw);
+    } catch (e) {
+      res.status(400).json({ error: { message: "Could not parse request body as JSON." } });
+      return;
+    }
   }
 
   const { model, max_tokens, system, messages } = body;
 
+  // Validate
   if (!messages || !Array.isArray(messages) || messages.length === 0) {
-    return res.status(400).json({ error: { message: "messages array required." } });
+    res.status(400).json({ error: { message: "messages array is required. Received: " + JSON.stringify(Object.keys(body)) } });
+    return;
   }
-  if (messages.length > 20) return res.status(400).json({ error: { message: "Too many messages." } });
 
+  // Safe defaults
   const allowedModels = ["claude-sonnet-4-20250514", "claude-haiku-4-5-20251001"];
   const safeModel = allowedModels.includes(model) ? model : "claude-sonnet-4-20250514";
-  const safeMaxTokens = Math.min(Math.max(parseInt(max_tokens) || 1000, 1), 2000);
+  const safeTokens = Math.min(Math.max(parseInt(max_tokens) || 1000, 1), 2000);
 
   try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
+    const anthropicRes = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -82,21 +79,24 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: safeModel,
-        max_tokens: safeMaxTokens,
-        system: (system || "").slice(0, 4000),
-        messages: messages,
+        max_tokens: safeTokens,
+        system: String(system || "").slice(0, 4000),
+        messages: messages.slice(0, 20),
       }),
     });
 
-    const data = await response.json();
+    const data = await anthropicRes.json();
 
-    if (!response.ok) {
-      return res.status(response.status).json({ error: { message: data?.error?.message || "API error" } });
+    if (!anthropicRes.ok) {
+      res.status(anthropicRes.status).json({
+        error: { message: data?.error?.message || "Anthropic API returned " + anthropicRes.status }
+      });
+      return;
     }
 
-    return res.status(200).json(data);
+    res.status(200).json(data);
   } catch (err) {
-    console.error("Proxy error:", err.message);
-    return res.status(500).json({ error: { message: "Internal server error." } });
+    console.error("API proxy error:", err);
+    res.status(500).json({ error: { message: "Server error contacting Anthropic." } });
   }
-}
+};
