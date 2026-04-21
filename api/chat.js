@@ -6,27 +6,47 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: { message: "POST only" } });
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return res.status(500).json({ error: { message: "ANTHROPIC_API_KEY not set" } });
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return res.status(500).json({ error: { message: "GEMINI_API_KEY not set" } });
 
   const body = req.body;
   if (!body || !body.messages) return res.status(400).json({ error: { message: "missing messages" } });
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  // Convert from Claude format to Gemini format
+  const systemText = body.system || "";
+  const geminiContents = body.messages.map(msg => ({
+    role: msg.role === "assistant" ? "model" : "user",
+    parts: [{ text: msg.content }]
+  }));
+
+  const geminiBody = {
+    system_instruction: { parts: [{ text: systemText }] },
+    contents: geminiContents,
+    generationConfig: {
+      maxOutputTokens: body.max_tokens || 1000,
+      temperature: 0.7
+    }
+  };
+
+  const model = "gemini-2.0-flash";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+  const response = await fetch(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01"
-    },
-    body: JSON.stringify({
-      model: body.model || "claude-sonnet-4-20250514",
-      max_tokens: body.max_tokens || 1000,
-      system: body.system || "",
-      messages: body.messages
-    })
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(geminiBody)
   });
 
   const data = await response.json();
-  return res.status(response.status).json(data);
+
+  if (!response.ok) {
+    const errMsg = data?.error?.message || "Gemini API error";
+    return res.status(response.status).json({ error: { message: errMsg } });
+  }
+
+  // Convert Gemini response back to Claude format so the frontend works unchanged
+  const text = data?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "";
+  return res.status(200).json({
+    content: [{ type: "text", text: text }]
+  });
 }
